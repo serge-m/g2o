@@ -1,5 +1,6 @@
 add_executable(ba_my
         ba_my.cpp
+        optimizer.cpp
 )
 
 include_directories(${CHOLMOD_INCLUDE_DIR})
