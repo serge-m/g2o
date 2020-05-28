@@ -7,6 +7,7 @@ add_subdirectory(sphere)
 if(CHOLMOD_FOUND)
   add_subdirectory(target)
   add_subdirectory(ba)
+  add_subdirectory(ba_my)
   add_subdirectory(ba_anchored_inverse_depth)
 endif(CHOLMOD_FOUND)
 
