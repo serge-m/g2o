@@ -52,6 +52,13 @@ g2o::EdgeProjectXYZ2UV *createProjectionEdge(bool ROBUST_KERNEL,
                                              g2o::VertexSBAPointXYZ *v_p, const Vector2d &z,
                                              g2o::HyperGraph::Vertex *pVertex);
 
+Vector3d
+getDiff(const shared_ptr<g2o::SparseOptimizer> &optimizer, const vector<Vector3d> &true_points, const int pointid,
+        const int trueid);
+
+double calcSumDiff(const shared_ptr<g2o::SparseOptimizer> &optimizer, const vector<Vector3d> &true_points,
+                   const unordered_map<int, int> &pointid_2_trueid, const unordered_set<int> &inliers);
+
 int num_observations(const Matrix<double, 3, 1> &cur_true_point,
                      const vector<g2o::SE3Quat, aligned_allocator<g2o::SE3Quat>> &true_poses,
                      const g2o::CameraParameters *cam_params) {
@@ -152,7 +159,6 @@ int main(int argc, const char *argv[]) {
     }
     int point_id = vertex_id;
     int point_num = 0;
-    double sum_diff2 = 0;
 
     cout << endl;
     unordered_map<int, int> pointid_2_trueid;
@@ -193,9 +199,6 @@ int main(int argc, const char *argv[]) {
 
             if (inlier) {
                 inliers.insert(point_id);
-                Vector3d diff = v_p->estimate() - true_points[i];
-
-                sum_diff2 += diff.dot(diff);
             }
             pointid_2_trueid.insert(make_pair(point_id, i));
             ++point_id;
@@ -203,68 +206,53 @@ int main(int argc, const char *argv[]) {
         }
     }
 
-    auto b = pointid_2_trueid.begin();
-    g2o::HyperGraph::Vertex *vertex = getVertexById(optimizer.get(), b->first);
-    auto true_point = true_points[b->second];
-    g2o::VertexSBAPointXYZ *vertex_cast = dynamic_cast<g2o::VertexSBAPointXYZ *>(vertex);
-    cout << vertex_cast->estimate() << "\n";
-    cout << true_point << "\n";
-    auto diff = vertex_cast->estimate() - true_point;
-    cout << diff.dot(diff) << "\n";
-    
-//    std::accumulate(
-//            pointid_2_trueid.begin(), pointid_2_trueid.end(), 0.0,
-//            [&optimizer,&true_points](double sum, std::pair<int, int> pointid_trueid) {
-//                Vector3d diff = getVertexById(optimizer, pointid_trueid.first)->estimate() - true_points[pointid_trueid.second];
-//                return sum + diff.dot(diff);
-//            }
-//    );
-
+    double sum_diff_ = calcSumDiff(optimizer, true_points, pointid_2_trueid, inliers);
 
     cout << endl;
     optimizer->initializeOptimization();
     optimizer->setVerbose(true);
-//    if (STRUCTURE_ONLY) {
-//        g2o::StructureOnlySolver<3> structure_only_ba;
-//        cout << "Performing structure-only BA:" << endl;
-//        g2o::OptimizableGraph::VertexContainer points;
-//        for (g2o::OptimizableGraph::VertexIDMap::const_iterator it = optimizer->vertices().begin();
-//             it != optimizer->vertices().end(); ++it) {
-//            g2o::OptimizableGraph::Vertex *v = static_cast<g2o::OptimizableGraph::Vertex *>(it->second);
-//            if (v->dimension() == 3)
-//                points.push_back(v);
-//        }
-//        structure_only_ba.calc(points, 10);
-//    }
-    //optimizer->save("test.g2o");
+
+    optimizer->save("my_ba_before_optimization.g2o");
     cout << endl;
     cout << "Performing full BA:" << endl;
     optimizer->optimize(10);
+
+    optimizer->save("my_ba_after_optimization.g2o");
     cout << endl;
-    cout << "Point error before optimisation (inliers only): " << sqrt(sum_diff2 / inliers.size()) << endl;
-    point_num = 0;
-    sum_diff2 = 0;
-    for (auto it = pointid_2_trueid.begin(); it != pointid_2_trueid.end(); ++it) {
-        g2o::HyperGraph::VertexIDMap::iterator v_it
-                = optimizer->vertices().find(it->first);
-        if (v_it == optimizer->vertices().end()) {
-            throw runtime_error("Vertex " + std::to_string(it->first) + " not in graph!");
-        }
-        g2o::VertexSBAPointXYZ *v_p = dynamic_cast< g2o::VertexSBAPointXYZ * > (v_it->second);
-        if (v_p == nullptr) {
-            throw runtime_error("Vertex " + std::to_string(it->first) + "is not a PointXYZ!");
-        }
-        Vector3d diff = v_p->estimate() - true_points[it->second];
-        if (inliers.find(it->first) == inliers.end())
-            continue;
-        sum_diff2 += diff.dot(diff);
-        ++point_num;
-    }
-    cout << "Point error after optimisation (inliers only): " << sqrt(sum_diff2 / inliers.size()) << endl;
+    cout << "Point error before optimisation (inliers only): " << sqrt(sum_diff_ / inliers.size()) << endl;
+
+    auto sum_diff2_after = calcSumDiff(optimizer, true_points, pointid_2_trueid, inliers);
+    cout << "Point error after optimisation (inliers only): " << sqrt(sum_diff2_after / inliers.size()) << endl;
     cout << endl;
 }
 
+double calcSumDiff(const shared_ptr<g2o::SparseOptimizer> &optimizer, const vector<Vector3d> &true_points,
+                   const unordered_map<int, int> &pointid_2_trueid, const unordered_set<int> &inliers) {
+    const double sum_diff_ = accumulate(
+            pointid_2_trueid.begin(), pointid_2_trueid.end(), 0.0,
+            [&optimizer, &true_points, &inliers](double sum, pair<int, int> pointid_trueid) {
+                if (inliers.find(pointid_trueid.first) == inliers.end()) {
+                    return sum;
+                }
+                Vector3d diff = getDiff(optimizer, true_points, pointid_trueid.first, pointid_trueid.second);
+                return sum + diff.dot(diff);
+            }
+    );
+    return sum_diff_;
+}
 
+Vector3d
+getDiff(const shared_ptr<g2o::SparseOptimizer> &optimizer, const vector<Vector3d> &true_points, const int pointid,
+        const int trueid) {
+    g2o::HyperGraph::Vertex *vertex = getVertexById(optimizer.get(), pointid);
+    auto true_point = true_points[trueid];
+    g2o::VertexSBAPointXYZ *vertex_cast = dynamic_cast<g2o::VertexSBAPointXYZ *>(vertex);
+    assert(vertex_cast != nullptr);
+//    cout << vertex_cast->estimate() << "\n";
+//    cout << true_point << "\n";
+    Vector3d diff = vertex_cast->estimate() - true_point;
+    return diff;
+}
 
 
 g2o::EdgeProjectXYZ2UV *createProjectionEdge(bool ROBUST_KERNEL, g2o::VertexSBAPointXYZ *v_p, const Vector2d &z,
